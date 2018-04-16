@@ -28,5 +28,21 @@
 
 # Executables
 *.exe
+*.ilk
+*.pdb
+*.exp
 *.out
 *.app
+
+
+# visual studio env
+
+#visual studio
+*.ncb
+
+# intermediate dir
+Debug
+Release
+
+
+
