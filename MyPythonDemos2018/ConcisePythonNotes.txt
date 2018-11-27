@@ -27,6 +27,9 @@ interactive mode时， >>> 是命令提示符， ... 是续行提示符
 source code encoding的指定可以在文件中的第一行放置如下格式的内容。(含unix命令设置的，则格式是第二行。)
 # -*- coding: encoding -*-
 
+或者
+# coding=utf-8
+
 例如,
 #!/usr/bin/env python3
 # -*- coding: cp-1252 -*-
@@ -409,6 +412,9 @@ package
 
 importing * from package
 	使用"from ... import *"时仅载入__init__.py中__all__定义的modules.
+	例如, collections/__init__.py中定义了
+	__all__ = ['deque', 'defaultdict', 'namedtuple', 'UserDict', 'UserList',
+            'UserString', 'Counter', 'OrderedDict', 'ChainMap']
 
 .Input and Output
 ----------
@@ -939,6 +945,7 @@ __slots__								__slots__ reserves space for the declared variables and prevent
 
 	class MySubclass(MyClass):
 		pass
+		
 类定义的执行顺序，
 	1.确定metaclass
 	2.准备class namespace
