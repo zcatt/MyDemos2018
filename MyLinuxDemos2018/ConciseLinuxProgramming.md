@@ -1091,6 +1091,7 @@ void *malloc(size_t size);
 void free(void *ptr);
 void *calloc(size_t nmemb, size_t size);
 void *realloc(void *ptr, size_t size);
+void *memset(void *s, int c, size_t n);
 
 void *mmap(void *addr, size_t length， int prot, int flags ,
            int fd, off_t offset);
@@ -1378,12 +1379,601 @@ daemon进程脱离了终端，调试较为特殊，一般使用syslog()函数想
 ```
     tail -N /var/log/messages
 ```
+
+```
+void openlog(const char *ident, int option, int facility);
+void syslog(int priority, const char *format, ...);
+void closelog(void);
+void vsyslog(int priority, const char *format, va_list ap);
+```
 # X. 进程通信
+进程间通信(IPC, InterProcess Communication)的方法有, signal, pipe, socket和system V IPC机制。system V IPC机制包括message queue, shared memory和semaphore.
+* signal, 用于通知接收进程某个事件发生。
+* pipe, 半双工的通信方式，数据只能单向流动且只能在具有亲缘关系(通常是父子关系)的进程间使用
+* 命名管道FIFO, 也是半双工通信方式，但允许无亲缘进程间通信
+* message queue， 
+* shared memory, 映射一段能被其他进程访问的内存。一个进程创建，多个进程共享。共享内存是最快的IPC方式。
+* semaphore, 一个计数器，用来控制多个进程对共享资源的访问。是一种锁机制，用做同步手段。
+* socket, 可用于不同机器间的进程通信。
+
+## XX.信号
+信号是在软件层次上对中断机制的一种模拟。信号事件的发生有两个来源:
+* 硬件来源
+* 软件来源
+信号的响应有3种方式
+1. 执行默认操作
+2. 捕捉信号，定义信号处理函数，当信号发生时执行处理函数
+3. 忽略信号。
+有两个信号是应用程序无法捕捉和忽略的, SIGKILL, SEGSTOP.
+
+### 常用信号
+```
+SIGHUP  用户终端连接结束时发出
+SIGINT  CTRL+C
+SIGQUIT CTRL+\
+SIGILL  进程试图执行非法指令时发出
+SIGFPE  算术运算错误
+SIGKILL 立即结束
+SIGALARM    定时器计时完成时发出
+SIGSTOP     暂停一个进程
+SIGSTP  挂起键CTRL+Z
+SIGCHLD 子进程结束时向父进程发出
+```
+
+### 信号发生和处理函数
+```
+int kill(pid_t pid, int sig);
+    send a signal to a process or a group of processes。
+    If sig is 0 (the null signal), error checking is performed but no signal is actually sent. The null signal can be used to check the validity of pid.
+        pid > 0, 发送到pid进程
+        pid = 0， 发送到同进程组的所有进程
+        pid = -1， 广播到系统内所有进程
+        pid < 0, 信号发送到-pid进程组内的所有进程
+
+int raise(int sig);
+    send a signal to the executing process.给当前进程发信号。
+
+void (*signal(int sig, void (*func)(int)))(int);
+    signal management。设置信号处理方式。
+    func可以指向处理函数的指针，或者
+        SIG_IGN, 忽略该信号
+        SIG_DFL, 默认处理
+
+
+```
+
+### 信号阻塞
+收到信号时不希望终端当下工作，而是希望延迟一段时间再调用处理函数，可以使用信号阻塞来完成。阻塞集指定了将被阻塞的信号类型，相应类型的信号将被阻塞，不会激发处理，而信号类型从阻塞集删除时，如果有阻塞中的该类型信号，此时会激发处理。
+```
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+    查询和设置信号掩码. sigprocmask() is used to fetch and/or change the signal mask of the calling thread.  The signal mask is the set of signals whose delivery is currently blocked for the caller.
+    how,
+       SIG_BLOCK 
+              The set of blocked signals is the union of the current set andthe set argument.
+       SIG_UNBLOCK
+              The signals in set are removed from the current set of blocked signals.  It is permissible to attempt to unblock a signal which is not blocked.
+       SIG_SETMASK
+              The set of blocked signals is set to the argument set.        
+
+int sigemptyset(sigset_t *set);
+     initializes the signal set given by set to empty, with        all signals excluded from the set.
+
+int sigfillset(sigset_t *set);
+    initializes set to full, including all signals.
+
+int sigaddset(sigset_t *set, int signum);
+int sigdelset(sigset_t *set, int signum);
+     add and delete respectively signal signum from set.
+
+int sigismember(const sigset_t *set, int signum);
+    tests whether signum is a member of set.
+
+
+ Objects of type sigset_t must be initialized by a call to either sigemptyset() or sigfillset() before being passed to the functions sigaddset(), sigdelset() and sigismember() or the additional glibc functions described below (sigisemptyset(), sigandset(), and sigorset()).  The results are undefined if this is not done.    
+```
+
+## XX.管道
+管道允许在进程间按FIFO方式传送数据，是单向半双工的数据通道。
+```
+    ls | more
+```
+管道分为两种，
+* 无名管道(pipe)， 只能在具有亲缘关系的父子或兄弟进程间使用。使用pipe()创建，当最后一个使用它的进程关闭对它的引用时，pipe将自动撤消.
+* 命名管道， 以路径名字关联，不限定于亲缘关系间进程使用。有名管道以FIFO文件形式存在于文件系统，确保了与名字对应的唯一性。通过mknod()或mkfifo()创建，类似文件的管理方法。
+管道的实质是一个内核缓冲区，按照FIFO进行读写。
+
+### 无名管道
+一个管道对应两个file结构，分别用于读和写。
+无名管道的使用步骤，
+1. 父进程调用pipe()创建管道，得到两个file描述符。
+2. 父进程fork创建子进程，子进程继承父进程的管道信息，即上述file描述符。
+3. 父子进程分别关闭相应的读或写file描述符, 这样管道就成为了一个单向的数据通道。
+```
+int pipe(int fildes[2]);
+    create an interprocess channel
+    fildes[0]是读取端
+    fildes[1]是写入端
+```
+管道使用的几种特殊情况，
+* 所有写入端都关闭，当读取端读尽时，read会返回0
+* 若存在未关闭的写入端，当读取端读尽时，read会阻塞
+* 若所有读取端都已经关闭，则写入端的write会阻塞
+* 若存在未关闭的读取端，当写入端写满时，write会阻塞
+
+| |写入端引用计数 > 0 | 写入端引用计数 = 0|
+|-|-|-|
+|读取端端引用计数 > 0 |写满时write阻塞 读尽时read阻塞 | 读尽时read返回0|
+|读取端端引用计数 = 0 |write阻塞| close |
+
+### 命名管道
+使用步骤
+* mkfifo创建管道
+* 根据读写方式使用open()打开管道
+* 应用宏建立文件描述符集，设定等待时间，使用select()实现非阻塞传送
+* 使用read,wirte读写
+* 使用完毕后关闭管道
+
+```
+int mkfifo(const char *pathname, mode_t mode);
+    make a FIFO special file (a named pipe)
+
+int select(int nfds, fd_set *restrict readfds, fd_set *restrict writefds, fd_set *restrict errorfds, struct timeval *restrict timeout);
+    synchronous I/O multiplexing.
+
+    FD_ZERO(fd_set*);
+    FD_SET(int, fd_set*);
+    FD_CLR(int, fd_set*);
+    FD_ISSET(int, fd_set*);
+```
+
+## XX.message queue
+消息队列是内核中保存的消息链表，用户进程可以读取的写入。
+使用步骤，
+* 使用ftok()得到key
+* msgget(key)产生一个消息队列
+* msgsnd()和msgrcv()
+* msgctl()可以用来删除消息队列。
+
+```
+key_t ftok(const char *pathname, int proj_id);
+    建立一个IPC key。convert a pathname and a project identifier to a System V IPC key
+    The ftok() function uses the identity of the file named by the given pathname (which must refer to an existing, accessible file) and the least significant 8 bits of proj_id (which must be nonzero) to generate a key_t type System V IPC key.
+
+int msgget(key_t key, int msgflg);
+    建立消息队列。 get a System V message queue identifier.
+    The msgget() system call returns the System V message queue identifier associated with the value of the key argument.  It may be used either to obtain the identifier of a previously created message queue (when msgflg is zero and key does not have the value IPC_PRIVATE), or to create a new set.
+    
+int msgsnd(int msqid, const struct msgbuf *msgp, size_t msgsz, int msgflg);
+ssize_t msgrcv(int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp, int msgflg);
+    发送和接受消息。
+
+struct msgbuf {
+               long mtype;       /* message type, must be > 0 */
+               char mtext[1];    /* message data */
+           };
+
+```
+
+## XX.shared memory
+共享内从的优点是效率高。
+### XXX.内存映射
+内存映射memory map机制使进程间通过映射同一个普通文件实现共享内存。普通文件映射到进程地址空间后，进程可以象访问普通内存一样对文件进行访问，不必再调用read/write等文件操作函数。
+
+```
+void *mmap(void *addr, size_t len, int prot, int flags, int fildes, off_t off);
+    establish a mapping between an address space of a process and a memory object. 
+    The mmap() function shall be supported for the following memory objects:
+        * Regular files
+        * Shared memory objects
+        * Typed memory objects
+     The parameter prot determines whether read, write, execute, or some combination of accesses are permitted to the data being mapped.
+        PROT_READ   Data can be read.
+        PROT_WRITE  Data can be written.     
+        PROT_EXEC   Data can be executed.    
+        PROT_NONE   Data cannot be accessed. 
+     The parameter flags provides other information about the handling of the mapped data.        
+        MAP_SHARED  Changes are shared. 
+        MAP_PRIVATE Changes are private.    
+        MAP_FIXED   Interpret addr exactly. 
+
+int munmap(void *addr, size_t len);
+     unmap pages of memory        
+```
+### Unix System V共享内存
+与上面的内存映射memory map不同，该共享内存是使用共享内存(IPC shared memory region), 任何想访问共享内存区域数据的进程都必须在自己的地址空间新曾一块内存区域，映射存放共享数据的物理内存页面。
+一般步骤
+* ftok得到IPC key
+* shmget创建/取得共享内存区，得到其ID
+* shmat将共享内存区映射到进程自己的内存空间
+* shmdt解除进程对共享内存区映射
+
+```
+int shmget(key_t key, size_t size, int shmflg);
+    get an XSI shared memory segment.
+    key
+        IPC_PRIVATE     建立新的共享内存
+    shmflg
+        0   取已经存在的共享内存标识符
+        IPC_CREATE  若不存在则创建
+        IPC_CREATE|IPC_EXCL 若不存在则创建,若存在则报错
+
+void *shmat(int shmid, const void *shmaddr, int shmflg);
+    attaches the System V shared memory segment identified by shmid to the address space of the calling process.  The attaching address is specified by shmaddr with one of the following criteria: 
+       *  If shmaddr is NULL, the system chooses a suitable (unused) page-aligned address to attach the segment.
+       *  If shmaddr isn't NULL and SHM_RND is specified in shmflg, the attach occurs at the address equal to shmaddr rounded down to the nearest multiple of SHMLBA.
+       *  Otherwise, shmaddr must be a page-aligned address at which the attach occurs.
+    shmflg
+        SHM_EXEC (Linux-specific; since Linux 2.6.9)
+              Allow the contents of the segment to be executed.  The caller must have execute permission on the segment.
+
+       SHM_RDONLY
+              Attach the segment for read-only access.  The process must have read permission for the segment.  If this flag is not specified, the segment is attached for read and write access, and the process must have read and write permission for the segment.  There is no notion of a write-only shared memory segment.
+
+       SHM_REMAP (Linux-specific)
+              This flag specifies that the mapping of the segment should replace any existing mapping in the range starting at shmaddr and continuing for the size of the segment.  (Normally, an EINVAL error would result if a mapping already exists in this address range.)  In this case, shmaddr must not be NULL.
+
+int shmdt(const void *shmaddr);       
+    detaches the shared memory segment located at the address specified by shmaddr from the address space of the calling process.         
+
+int shmctl(int shmid, int cmd, struct shmid_ds *buf);    
+    shmctl() performs the control operation specified by cmd on the System V shared memory segment whose identifier is given in shmid.
+
+           struct shmid_ds {
+               struct ipc_perm shm_perm;    /* Ownership and permissions */
+               size_t          shm_segsz;   /* Size of segment (bytes) */
+               time_t          shm_atime;   /* Last attach time */
+               time_t          shm_dtime;   /* Last detach time */
+               time_t          shm_ctime;   /* Last change time */
+               pid_t           shm_cpid;    /* PID of creator */
+               pid_t           shm_lpid;    /* PID of last shmat(2)/shmdt(2) */
+               shmatt_t        shm_nattch;  /* No. of current attaches */
+               ...
+           };    
+```
+
+
 # X. 线程
-# X. 网络变编程
-## XX. TCP/IP
-## XX. socket变成
+线程thread也称作LWP， Light Weight Process.
+linux对线程和进程一视同仁， 每个线程都有自己的task_struct结构。一般使用pthread函数编程，编译时加上-lpthread，即使用libpthread库。本质上linux只有进程没有线程。
+
+## XX. 线程创建
+```
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine) (void *), void *arg);
+    starts a new thread in the calling process.  The new thread starts execution by invoking start_routine(); arg is passed as the sole argument of start_routine().
+    The new thread terminates in one of the following ways:
+    * It calls pthread_exit(3), specifying an exit status value that is available to another thread in the same process that calls pthread_join(3).
+    * It returns from start_routine().  This is equivalent to calling pthread_exit(3) with the value supplied in the return statement. 
+    * It is canceled (see pthread_cancel(3)).
+    * Any of the threads in the process calls exit(3), or the main thread performs a return from main().  This causes the termination of all threads in the process.
+
+
+int pthread_attr_init(pthread_attr_t *attr);
+    initializes the thread attributes object pointed to by attr with default attribute values.  After this call, individual attributes of the object can be set using various related functions, and then the object can be used in one or more pthread_create(3) calls that create threads.
+int pthread_attr_destroy(pthread_attr_t *attr);       
+    When a thread attributes object is no longer required, it should be destroyed using the pthread_attr_destroy() function.  Destroying a thread attributes object has no effect on threads that were created using that object.
+
+pthread_t pthread_self(void);
+    obtain ID of the calling thread。
+
+int pthread_join(pthread_t thread, void **retval);
+    waits for the thread specified by thread to terminate.  If that thread has already terminated, then pthread_join() returns immediately.  The thread specified by thread must be joinable.         
+void pthread_exit(void *retval);
+    terminates the calling thread and returns a value via retval that (if the thread is joinable) is available to another thread in the same process that calls pthread_join(3).
+```
+
+## XX.线程同步和互斥
+3种线程同步互斥机制,
+* 互斥锁mutext. 同一时刻只有一个线程可以锁定它。如果另一个线程试图锁定，则会阻塞。
+* 条件变量cond. 
+* 信号量.
+
+### mutex
+mutex保证一段时间内只有一个线程在执行一段代码。
+使用步骤，
+* pthread_mutex_lock(&cat)给线程加锁，锁定临界区
+* 临界区操作
+* pthread_mutex_unlock(&cat)释放互斥锁
+
+```
+int pthread_mutex_init(pthread_mutex_t *restrict mutex, const pthread_mutexattr_t *restrict attr);
+    initialize the mutex referenced by mutex with attributes specified by attr.  If attr is NULL, the default mutex attributes are used; the effect shall be the same as passing the address of a default mutex attributes object. 
+    Upon successful initialization, the state of the mutex becomes initialized and unlocked.
+
+int pthread_mutex_destroy(pthread_mutex_t *mutex);
+    destroy the mutex object referenced by mutex; the mutex object becomes, in effect, uninitialized.
+    It shall be safe to destroy an initialized mutex that is unlocked. Attempting to destroy a locked mutex or a mutex that is referenced (for example, while being used in a pthread_cond_timedwait() or pthread_cond_wait()) by another thread results in undefined behavior
+
+
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+    If the mutex is already locked by another thread, the calling thread shall block until the mutex becomes available. This operation shall return with the mutex object referenced by mutex in the locked state with the calling thread as its owner. 
+    If a thread attempts to relock a mutex that it has already locked, pthread_mutex_lock() shall behave as described in the Relock column of the following table. 
+    If a thread attempts to unlock a mutex that it has not locked or a mutex which is unlocked, pthread_mutex_unlock() shall behave as described in the Unlock When Not Owner column of the following table.
+
+        ┌───────────┬────────────┬────────────────┬───────────────────────┐
+        │Mutex Type │ Robustness │     Relock     │ Unlock When Not Owner │
+        ├───────────┼────────────┼────────────────┼───────────────────────┤
+        │NORMAL     │ non-robust │ deadlock       │ undefined behavior    │
+        ├───────────┼────────────┼────────────────┼───────────────────────┤
+        │NORMAL     │ robust     │ deadlock       │ error returned        │
+        ├───────────┼────────────┼────────────────┼───────────────────────┤
+        │ERRORCHECK │ either     │ error returned │ error returned        │
+        ├───────────┼────────────┼────────────────┼───────────────────────┤
+        │RECURSIVE  │ either     │ recursive      │ error returned        │
+        │           │            │ (see below)    │                       │
+        ├───────────┼────────────┼────────────────┼───────────────────────┤
+        │DEFAULT    │ non-robust │ undefined      │ undefined behavior†   │
+        │           │            │ behavior†      │                       │
+        ├───────────┼────────────┼────────────────┼───────────────────────┤
+        │DEFAULT    │ robust     │ undefined      │ error returned        │
+        │           │            │ behavior†      │                       │
+        └───────────┴────────────┴────────────────┴───────────────────────┘
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+    equivalent to pthread_mutex_lock(), except that if the mutex object referenced by mutex is currently locked (by any thread, including the current thread), the call shall return immediately. If the mutex type is PTHREAD_MUTEX_RECURSIVE and the mutex is currently owned by the calling thread, the mutex lock count shall be incremented by one and the pthread_mutex_trylock() function shall immediately return success.
+    
+```
+
+### 条件变量cond
+条件变量通过允许线程阻塞和等待另一个线程发送信号的方法弥补了互斥锁的不足，常和互斥锁一起使用。
+一般的算法，
+```
+
+        pthread_mutex_lock(&mutexVar);
+        while (ifContinueWait)
+        {
+            doSomeThing;
+            pthread_cond_wait(&condVar, &mutexVar);
+        }
+        doSomeThing
+        pthread_mutex_unlock(&mutexVar);
+```
+
+```
+
+int pthread_cond_destroy(pthread_cond_t *cond);
+int pthread_cond_init(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr);
+    destroy and initialize condition variables
+
+int pthread_cond_timedwait(pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex, const struct timespec *restrict abstime);
+int pthread_cond_wait(pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex);
+    block on a condition variable. 必须放置在pthread_mutex_lock和pthread_mutex_unlock之间.
+    These functions atomically release mutex and cause the calling thread to block on the condition variable cond; atomically here means ``atomically with respect to access by another thread to the mutex and then the condition variable''. That is, if another thread is able to acquire the mutex after the about-to-block thread has released it, then a subsequent call to pthread_cond_broadcast() or pthread_cond_signal() in that thread shall behave as if it were issued after the about-to-block thread has blocked.
+
+int pthread_cond_signal(pthread_cond_t *cond);
+    释放阻塞在cond上的一个线程。
+int pthread_cond_broadcast(pthread_cond_t *cond);
+    unblock all threads currently blocked on the specified condition variable cond.        
+
+    If more than one thread is blocked on a condition variable, the scheduling policy shall determine the order in which threads are unblocked. When each thread unblocked as a result of a pthread_cond_broadcast() or pthread_cond_signal() returns from its call to pthread_cond_wait() or pthread_cond_timedwait(), the thread shall own the mutex with which it called pthread_cond_wait() or pthread_cond_timedwait().  The thread(s) that are unblocked shall contend for the mutex according to the scheduling policy (if applicable), and as if each had called pthread_mutex_lock().
+
+```
+
+### 信号量 semphore
+关于PV操作， p操作和v操作是不可中断的程序段，称为原语。P,V原语中P是荷兰语的Passeren，相当于英文的pass, V是荷兰语的Verhoog,相当于英文中的incremnet。且在P,V原语执行期间不允许有中断的发生。
+具体定义如下： S为正表示可用资源数，为负表示等待进程数。P表示申请一个资源，V表示释放一个资源。
+* P（S）：
+    1. 将信号量S的值减1，即S=S-1；
+    2. 如果S>=0，则该进程继续执行；否则该进程置为等待状态，排入等待队列。(注，没饭了就睡觉)
+* V（S）：
+    1. 将信号量S的值加1，即S=S+1；
+    2. 如果S>0，则该进程继续执行；否则释放队列中第一个等待信号量的进程。(注，增加了一人份的饭，故可以唤醒一个人吃掉。)
+
+```
+int sem_init(sem_t *sem, int pshared, unsigned int value);
+    initializes the unnamed semaphore at the address pointed to by sem.  The value argument specifies the initial value for the semaphore.
+    pshared
+        =0   the semaphore is shared between the threads of a process, and should be located at some address that is visible to all threads 
+        !=0  the semaphore is shared between processes, and should be located in a region of shared memory
+
+int sem_destroy(sem_t *sem);
+    destroys the unnamed semaphore at the address pointed to by sem.        
+
+
+int sem_wait(sem_t *sem);
+     decrements (locks) the semaphore pointed to by sem.  If the semaphore's value is greater than zero, then the decrement proceeds, and the function returns, immediately.  If the semaphore currently has the value zero, then the call blocks until either it becomes possible to perform the decrement (i.e., the semaphore value rises above zero), or a signal handler interrupts the call.
+
+int sem_trywait(sem_t *sem);
+    the same as sem_wait(), except that if the decrement cannot be immediately performed, then call returns an error (errno set to EAGAIN) instead of blocking.
+
+int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout);    
+    the same as sem_wait(), except that abs_timeout specifies a limit on the amount of time that the call should block if the decrement cannot be immediately performed. 
+
+int sem_post(sem_t *sem);
+    increments (unlocks) the semaphore pointed to by sem.  If the semaphore's value consequently becomes greater than zero, then another process or thread blocked in a sem_wait(3) call will be woken up and proceed to lock the semaphore.
+
+```    
+
+# X. 网络编程
+## XX.基本概念
+TCP/IP是一个协议族，例如TCP,IP, UDP, ICMP, SMTP, SNMP, FPT, ARP等都是其中的协议。
+TCP和UDP是两种不同的网络传输方式
+* TCP是面向连接的可靠的网络传输方式。
+* UDP是不面向连接的数据报形式的不可靠的网络传输方式。
+
+网络变成种的端口，是为了标识在计算机中访问网络的不同程序而设的编号。每个程序在访问网络是都会分配一个标识号。端口是一个逻辑概念。
+socket，是网络变成的一种接口。在TCP/IP协议中"ip地址+TCP或UDP端口"可以唯一标识网络通信中的一个进程，"ip地址+TCP或UDP端口"可以视作一个socket. TCP中一个连接两端的进程各自有一个socket来标识， 故这两个socket组成的socket对就唯一标识一个连接。
+socket分作3种，stream socket, datagram socket, raw socket.
+
+一个套接字对应一个socket端口，由通信目的ip + tcp/udp + 使用的端口号定义。
+关于socket套接口的数据结构，
+```
+    struct sockaddr
+    {
+        unsigned short int sa_family;       //TCP/IP通信，为AF_INET
+        char sa_data[14];                   //ip地址和端口号
+    }
+
+    struct socketaddr_in
+    {
+        unsigned short int sin_family;  //同上述sa_family
+        uint16_t sin_port;              //端口号
+        struct in_addr sin_addr;        //要访问的ip地址
+        unsigned char sin_zero[8];      //全0，使得sockaddr和socketaddr_in等长
+    }
+
+```
+
+## XX.TCP编程
+TCP是面向连接的，故编程中需要建立连接和拆除连接
+
+服务器/客户端模型的一般算法，
+服务器
+* create socket, 建立socket
+* bind，并定本机socket端口
+* listen， 建立监听
+* accept，接受客户请求，建立连接。收到客户的SYNC，发送SYN-ACK应答，收到客户ACK后，accept()返回。
+* send/recv，数据通信
+* close，关闭
+
+客户端
+* create socket
+* connect， 向服务器发起请求连接。向服务器发送SYNC信号，阻塞，等待服务器应答；收到服务器SYN-ACK应答后，应答一个ACK。connect()返回。
+* send/recv，数据通信
+* close，关闭
+
+
+```
+int socket(int domain, int type, int protocol);
+    creates an endpoint for communication and returns a file descriptor that refers to that endpoint.  The file descriptor returned by a successful call will be the lowest-numbered file descriptor not currently open for the process.    
+    The domain argument specifies a communication domain; this selects the protocol family which will be used for communication.
+        AF_INET             IPv4 Internet protocols          ip(7)
+        AF_INET6            IPv6 Internet protocols          ipv6(7)
+    Type specifies the communication semantics.     
+        SOCK_STREAM     Provides sequenced, reliable, two-way, connection-based byte streams.  An out-of-band data transmission mechanism may be supported.
+        SOCK_DGRAM      Supports datagrams (connectionless, unreliable messages of a fixed maximum length).
+        SOCK_RAW        Provides raw network protocol access.    
+    Since Linux 2.6.27, the type argument serves a second purpose: in addition to specifying a socket type, it may include the bitwise OR of any of the following values, to modify the behavior of socket():        
+        SOCK_NONBLOCK   Set the O_NONBLOCK file status flag on the new open file description.  
+        SOCK_CLOEXEC    Set the close-on-exec (FD_CLOEXEC) flag on the new file descriptor.  See the description of the
+    protocol, 
+        0       自动选择。
+            
+int bind(int socket, const struct sockaddr *my_address, socklen_t address_len);            
+    将本机上一个端口与socket绑定，随后就可以在该端口监听服务请求。
+    bind a name to a socket。
+    When a socket is created with socket(2), it exists in a name space (address family) but has no address assigned to it.  bind() assigns the address specified by addr to the socket referred to by the file descriptor sockfd.  addrlen specifies the size, in bytes, of the address structure pointed to by addr.  Traditionally, this operation is called “assigning a name to a socket”.
+    It is normally necessary to assign a local address using bind() before a SOCK_STREAM socket may receive connections.
+
+int connect(int socket, const struct sockaddr *serv_address, socklen_t address_len);
+    面向连接的客户程序使用connect来配置socket并与远端服务器建立一个TCP连接。
+    attempt to make a connection on a connection-mode socket or to set or reset the peer address of a connectionless-mode socket. 
+
+int listen(int socket, int backlog);
+    让socket进入被动监听模式，并建立输入队列，当有服务请求到达时保存到输入队列，直到程序处理。
+    mark a connection-mode socket, specified by the socket argument, as accepting connections.
+    backlog，  provides a hint to the implementation which the implementation shall use to limit the number of outstanding connections in the socket's listen queue.
+
+int accept(int socket, struct sockaddr *restrict address, socklen_t *restrict address_len);  
+    让服务器接受客户的连接。
+    extract the first connection on the queue of pending connections, create a new socket with the same socket type protocol and address family as the specified socket, and allocate a new file descriptor for that socket.
+    If the listen queue is empty of connection requests and O_NONBLOCK is not set on the file descriptor for the socket, accept() shall block until a connection is present. If the listen() queue is empty of connection requests and O_NONBLOCK is set on the file descriptor for the socket, accept() shall fail and set errno to [EAGAIN] or [EWOULDBLOCK].
+
+int close(int fildes);
+    close a file descriptor.
+
+ ssize_t send(int socket, const void *buffer, size_t length, int flags);
+    initiate transmission of a message from the specified socket to its peer. The send() function shall send a message only when the socket is connected. If the socket is a connectionless-mode socket, the message shall be sent to the pre-specified peer address.        
+ssize_t recv(int socket, void *buffer, size_t length, int flags);
+    receive a message from a connected socket
+    receive a message from a connection-mode or connectionless-mode socket. It is normally used with connected sockets because it does not permit the application to retrieve the source address of received data.
+```
+
+## XX.UDP编程
+UDP是非连接的数据报协议，所以通信编程简单，但由于其传输的不可靠，需要在应用层实现相应的可靠性机制。
+
+发送方
+* create socket
+* prepare data
+* sendto
+* close
+
+接收方
+* create socket
+* bind. 将socket与本机上的一个端口绑定，即将端口赋值到socket结构中。
+* recvfrom
+* close
+
+```
+int bind(int socket, const struct sockaddr *my_address, socklen_t address_len);     
+    see above
+
+int close(int fildes);
+    see above
+
+ssize_t sendto(int socket, const void *message, size_t length, int flags, const struct sockaddr *dest_addr, socklen_t dest_len);        
+    send a message through a connection-mode or connectionless-mode socket.
+    If the socket is a connectionless-mode socket, the message shall be sent to the address specified by dest_addr if no pre-specified peer address has been set. If a peer address has been pre-specified, either the message shall be sent to the address specified by dest_addr (overriding the pre-specified peer address), or the function shall return −1 and set errno to [EISCONN].
+    If the socket is connection-mode, dest_addr shall be ignored.
+    If the socket protocol supports broadcast and the specified address is a broadcast address for the socket protocol, sendto() shall fail if the SO_BROADCAST option is not set for the socket.
+    Successful completion of a call to sendto() does not guarantee delivery of the message. A return value of −1 indicates only locally-detected errors.
+
+ssize_t recvfrom(int socket, void *restrict buffer, size_t length, int flags, struct sockaddr *restrict address, socklen_t *restrict address_len);    
+    receive a message from a connection-mode or connectionless-mode socket. It is normally used with connectionless-mode sockets because it permits the application to retrieve the source address of received data.
+
+```
+
+## XX.高级编程
+* 使用select()处理服务器端的accept()阻塞.
+* 使用O_NONBLOCK创建非阻塞socket
+
+
 # X. 图形编程
+SDL，Simple DirectMedia Layer
+```
+SDL的库
+SDL             基本库
+SDL_image       图像支持库
+SDL_mixer       混音支持库
+SDL_ttf         truetype字体支持库
+SDL_net         网络支持库
+SDL_draw        基本绘图函数库
+```
+
+## XX. 初始化图形模式
+```
+SDL_Init        初始化SDL库
+SDL_Quit        退出SDL
+SDL_SetVideoMode    设置videoMode
+SDL_MapRGB          构造一个color
+SDL_FillRect
+SDL_UpdateRect
+SDL_Delay
+```
+
+## XX. 基本绘图函数
+
+```
+Draw_Pixel
+Draw_Line
+Draw_Circle
+Draw_Rect
+Draw_Ellipse
+Draw_HLine
+Draw_VLine
+Draw_Round
+```
+
+## XX.图片和文字
+
+```
+SDL_LoadBMP
+SDL_BlitSurface
+TTF_OpenFont
+TTF_SetFontStyle
+TTF_RenderUTF8_Blended
+TTF_Init
+TTF_CloseFont
+TTF_Quit
+```
+
+## XX.动画设计
+```
+SDL_GetTicks
+SDL_Flip        交换屏幕缓冲
+```
+
+## XX.三维绘图
+
 # X. 设备驱动程序设计
 # X. 附录
 ## XX. 参考
