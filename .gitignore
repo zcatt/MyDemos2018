@@ -43,6 +43,8 @@
 # intermediate dir
 Debug
 Release
+__pycache__
+
 
 
 

@@ -17,9 +17,13 @@
 
 .MyDemos2018的列表
 -------------------------------------------------------------------------------
+MyHtmlDemos2018/
+	SnailBait						[3]的源码, copy from https://github.com/David-Geary/SnailBait
+
+MyLinuxDemos2018/
+	a01_initVideoMode					 SDL的video mode初始设置
 
 MyPythonDemos2018/
-	ConcisePythonNotes.txt                python3 doc中的tutorial和language ref的摘要
 
 
 MySTLDemos2018/
@@ -35,6 +39,11 @@ MySTLDemos2018/
 
 .参考
 -------------------------------------------------------------------------------
-.MSDN
-.c++ spec
+1.MSDN
+2.c++ spec
+3.David Geary, Core HTML5 2D Game Programming
+4.
+
+
+
 
